@@ -1,0 +1,105 @@
+@startuml PayLink_Use_Case_Diagram
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam nodesep 25
+skinparam ranksep 60
+
+actor "Customer" as Customer
+actor "Agent" as Agent
+actor "Support Employee" as Support
+actor "Admin" as Admin
+actor "Scheduler" as Scheduler <<System>>
+
+rectangle "PayLink Backend System" {
+  package "Accounts & Wallet" {
+    usecase "Register Account" as UC_Register
+    usecase "Upgrade Verification Level" as UC_Verify
+    usecase "View Wallet & History" as UC_Wallet
+    usecase "Top Up Wallet" as UC_TopUp
+  }
+
+  package "Bill Payments" {
+    usecase "Browse Billers & Services" as UC_Browse
+    usecase "Run Bill Inquiry" as UC_Inquiry
+    usecase "Pay Bill" as UC_Pay
+    usecase "Pay Bill on Behalf of Customer" as UC_AgentPay
+    usecase "Record Agent Commission" as UC_Commission
+    usecase "Run Fraud & Limit Checks" as UC_Fraud
+    usecase "Hold Funds" as UC_Hold
+    usecase "Release Funds\n(Auto-Refund)" as UC_Release
+    usecase "Handle Timeout & Re-query\nUnknown Payment" as UC_Timeout
+    usecase "Process Async Callback" as UC_Callback
+    usecase "Request Refund" as UC_ReqRefund
+  }
+
+  package "Support & Reconciliation" {
+    usecase "Search Payment History" as UC_Search
+    usecase "Block / Unblock Account" as UC_Block
+    usecase "Approve Refund" as UC_ApproveRefund
+    usecase "Run Nightly Reconciliation" as UC_Reconcile
+    usecase "Review Reconciliation\nDiscrepancies" as UC_ReviewRecon
+  }
+
+  package "Administration" {
+    usecase "Manage Billers & Services" as UC_ManageBillers
+    usecase "Configure Fees, Limits\n& Promotions" as UC_ConfigRules
+    usecase "View Daily Reports" as UC_Reports
+  }
+
+  usecase "Send Payment\nNotification" as UC_Notify
+}
+
+actor "External Biller\n(ElectroCo, AquaCo,\nTopUpNet, NetCo)" as Biller <<System>>
+actor "Notification Provider\n(SMS / Push / Email)" as NotifProvider <<System>>
+
+' Customer interactions
+Customer --> UC_Register
+Customer --> UC_Verify
+Customer --> UC_Wallet
+Customer --> UC_TopUp
+Customer --> UC_Browse
+Customer --> UC_Inquiry
+Customer --> UC_Pay
+Customer --> UC_ReqRefund
+
+' Agent interactions
+Agent --> UC_TopUp
+Agent --> UC_AgentPay
+Agent --> UC_Wallet
+
+' Support interactions
+Support --> UC_Search
+Support --> UC_Block
+Support --> UC_ApproveRefund
+Support --> UC_ReviewRecon
+
+' Admin interactions
+Admin --> UC_ManageBillers
+Admin --> UC_ConfigRules
+Admin --> UC_Reports
+
+' Scheduler interactions
+Scheduler --> UC_Reconcile
+
+' Include relationships
+UC_Pay ..> UC_Fraud : <<include>>
+UC_Pay ..> UC_Hold : <<include>>
+UC_Pay ..> UC_Notify : <<include>>
+UC_AgentPay ..> UC_Pay : <<include>>
+UC_AgentPay ..> UC_Commission : <<include>>
+UC_Callback ..> UC_Notify : <<include>>
+
+' Extend relationships
+UC_Release ..> UC_Pay : <<extend>>\n[biller refuses]
+UC_Timeout ..> UC_Pay : <<extend>>\n[biller timeout]
+
+' External system interactions (forced to the right side)
+NotifProvider -[hidden]down-> Biller
+UC_Notify -right-> NotifProvider
+UC_Inquiry -right-> Biller
+UC_Pay -right-> Biller
+UC_Timeout -right-> Biller
+UC_Callback <-right- Biller
+UC_Reconcile -right-> Biller
+@enduml

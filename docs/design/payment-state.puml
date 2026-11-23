@@ -1,0 +1,51 @@
+@startuml PayLink_Payment_State_Diagram
+top to bottom direction
+hide empty description
+skinparam shadowing false
+skinparam nodesep 45
+skinparam ranksep 50
+
+state Initiated
+state FundsHeld
+state Rejected
+state SentToBiller
+state Completed
+state Failed
+state Unknown
+state Refunded
+
+[*] --> Initiated
+
+Initiated --> FundsHeld : validatePayment\n[fraud checks pass &\nwallet has enough funds]
+Initiated --> Rejected : validatePayment\n[fraud check fails or\ninsufficient funds]
+
+FundsHeld --> SentToBiller : dispatchPayment\n[request sent to biller]
+
+SentToBiller --> Completed : billerResponse\n[biller confirms]
+SentToBiller --> Failed : billerResponse\n[biller refuses]
+SentToBiller --> Unknown : billerTimeout\n[no answer within 10s timeout]
+
+Unknown --> Completed : statusResolved\n[biller later confirms via\ncallback, retry, or settlement file]
+Unknown --> Failed : statusResolved\n[biller later refuses or\nreconciliation finds no payment]
+
+Failed --> Refunded : releaseHold\n[hold released to wallet]
+
+Rejected --> [*]
+Completed --> [*]
+Refunded --> [*]
+
+note right of Unknown
+  Funds remain held; never
+  refunded automatically.
+  Re-queried up to 3 times
+  (after 1, 5, and 15 minutes),
+  then awaits nightly reconciliation.
+end note
+
+note left of Completed
+  Final state. Post-completion
+  refunds (FR-27) use a separate
+  RefundRequest entity and are
+  not a state transition.
+end note
+@enduml

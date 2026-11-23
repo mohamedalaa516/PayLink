@@ -1,0 +1,152 @@
+' pay-bill-sequence.puml
+@startuml PayLink_Pay_Bill_Sequence
+autonumber
+skinparam shadowing false
+skinparam responseMessageBelowArrow true
+
+actor "Customer/App" as App
+participant "PaymentController" as Controller
+participant "PaymentProcessor" as Processor
+participant "IdempotencyStore" as Idem
+participant "FraudChecks" as Fraud
+participant "FeeCalculator" as Fee
+participant "WalletService/Ledger" as Wallet
+participant "BillerAdapter" as Adapter
+participant "External Biller" as Biller
+participant "NotificationService" as Notif
+participant "AuditLog" as Audit
+
+App -> Controller : POST /payments (billerId, billRef, billAmount, idempotencyKey)
+Controller -> Processor : processPayment(actorId, actorRole, payload, idempotencyKey)
+
+Processor -> Idem : checkOrLock(actorId, idempotencyKey, payloadHash) [TTL: 24h]
+
+alt Duplicate key with identical payloadHash (D5)
+  Idem --> Processor : cachedResponse
+  Processor --> Controller : return original result
+  Controller --> App : 200 OK (original payment result)
+else Duplicate key with different payloadHash (D5)
+  Idem --> Processor : payloadHashMismatch
+  Processor --> Controller : throw ConflictError
+  Controller --> App : 409 Conflict (Idempotency key reused with different payload)
+else Duplicate key, original request still in progress (FR-10 S2)
+  Idem --> Processor : requestInProgress
+  Processor --> Controller : throw RequestInProgressError
+  Controller --> App : 409 Conflict (Original request still processing; retry shortly)
+else New idempotency key
+  Idem --> Processor : lockAcquired
+  Processor -> Processor : createPayment(state = Initiated)
+
+  Processor -> Fraud : executeCheckChain(actorId, actorRole, billAmount)
+  note right of Fraud
+    Chain of Responsibility:
+    1. Blocked account check (D11)
+    2. Single-payment [5..10,000 EGP] & daily limit
+       excluding fee, reset 00:00 Africa/Cairo (D1, D2, D3)
+    3. Velocity (>5 unique attempts in 60s -> 10m block, D4)
+  end note
+
+  alt Fraud or limit check fails
+    opt Velocity rule triggered (>5 unique attempts in 60s)
+      Fraud -> Fraud : blockAccount(actorId, 10 minutes)
+      Fraud -> Audit : recordAccountBlock(actorId, "Velocity exceeded: 10m block")
+      Audit --> Fraud : auditRecorded
+    end
+    Fraud --> Processor : rejected(reason)
+    Processor -> Processor : transition(Initiated -> Rejected)
+    Processor -> Idem : saveResponse(actorId, idempotencyKey, Rejected)
+    Processor --> Controller : paymentRejected(reason)
+    Controller --> App : 400/403 Rejected (clear reason)
+  else Fraud checks pass
+    Fraud --> Processor : checksPassed
+
+    Processor -> Fee : calculateFee(billerId, billAmount) [D8, D10]
+    Fee --> Processor : serviceFee, totalAmount (exact decimal, ROUND_HALF_UP)
+
+    group Atomic DB Transaction [rolls back on audit/DB failure (FR-25 S3)]
+      Processor -> Wallet : holdFunds(payerWalletId, totalAmount, paymentRef)
+      note right of Wallet
+        Debits customer wallet or agent wallet (D3).
+        Atomic ledger-derived check prevents
+        negative balances under concurrency.
+      end note
+
+      alt Insufficient available balance
+        Wallet --> Processor : insufficientFunds
+        Processor -> Processor : transition(Initiated -> Rejected)
+      else Hold ledger entry committed
+        Wallet --> Processor : holdConfirmed(ledgerEntryId)
+        Processor -> Processor : transition(Initiated -> FundsHeld)
+        Processor -> Audit : recordMoneyMovement(actorId, HOLD, totalAmount, paymentRef)
+        Audit --> Processor : auditRecorded
+      end
+    end
+
+    alt Insufficient available balance (state = Rejected)
+      Processor -> Idem : saveResponse(actorId, idempotencyKey, Rejected)
+      Processor --> Controller : paymentRejected("Insufficient funds")
+      Controller --> App : 422 Rejected (Insufficient funds)
+    else Funds held (state = FundsHeld)
+      Processor -> Processor : transition(FundsHeld -> SentToBiller)
+      Processor -> Adapter : submitPayment(paymentRef, billRef, billAmount)
+      Adapter -> Biller : sendPaymentRequest(REST/JSON or SOAP/XML) [timeout: 10s]
+
+      alt Biller confirms payment
+        Biller --> Adapter : confirmed(billerTxId)
+        Adapter --> Processor : PaymentConfirmed(billerTxId)
+
+        group Atomic DB Transaction [rolls back on audit/DB failure (FR-25 S3)]
+          Processor -> Wallet : finalizeHoldAsCharge(payerWalletId, totalAmount, paymentRef)
+          Wallet --> Processor : chargeFinalized
+          Processor -> Wallet : creditFeeIncome(serviceFee, paymentRef)
+          Wallet --> Processor : feeIncomeCredited
+
+          opt Agent-assisted payment (D3)
+            Processor -> Fee : calculateAgentCommission(serviceFee)
+            Fee --> Processor : commission (40% of serviceFee, ROUND_HALF_UP)
+            Processor -> Wallet : creditAgentCommission(agentWalletId, commission, paymentRef)
+            Wallet --> Processor : commissionCredited
+          end
+
+          Processor -> Processor : transition(SentToBiller -> Completed)
+          Processor -> Audit : recordMoneyMovements(actorId, CHARGE + FEE [+ COMMISSION], paymentRef)
+          Audit --> Processor : auditRecorded
+        end
+
+        Processor ->> Notif : emitPaymentCompleted(customerId, paymentRef, totalAmount)
+        note right of Notif
+          Async SMS & Push (retry 3x on failure).
+          Notification failure never blocks or
+          reverses Completed payment.
+        end note
+        Notif ->> App : deliver SMS & Push receipt
+
+        Processor -> Idem : saveResponse(actorId, idempotencyKey, Completed)
+        Processor --> Controller : paymentCompleted(receipt)
+        Controller --> App : 200 OK (Completed)
+      else Biller refuses payment
+        ref over App, Audit
+          Refund a failed payment (refund-failed-payment-sequence.puml)
+          Trigger 1: Biller refuses; refund flow begins upon PaymentRefused received by PaymentProcessor
+          [SentToBiller -> Failed -> Refunded; includes async SMS & Push failure notification to Customer/App]
+        end ref
+        Processor -> Idem : saveResponse(actorId, idempotencyKey, Refunded)
+        Processor --> Controller : paymentFailedAndRefunded(reason)
+        Controller --> App : 422 Failed & Refunded (clear reason)
+      else Biller timeout (10s exceeded)
+        Biller --x Adapter : timeout (>10s)
+        Adapter --> Processor : PaymentTimedOut
+        Processor -> Processor : transition(SentToBiller -> Unknown)
+        note right of Processor
+          Funds stay HELD (never auto-refunded).
+          Schedule status re-queries after 1, 5, and 15 min;
+          if unresolved, await nightly reconciliation.
+        end note
+        Processor -> Idem : saveResponse(actorId, idempotencyKey, Unknown)
+        Processor --> Controller : paymentUnknown("Processing")
+        Controller --> App : 202 Accepted (Payment is being processed)
+      end
+    end
+  end
+end
+@enduml

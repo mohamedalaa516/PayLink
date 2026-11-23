@@ -1,0 +1,79 @@
+@startuml PayLink_Refund_Failed_Payment_Sequence
+autonumber
+skinparam shadowing false
+skinparam responseMessageBelowArrow true
+
+participant "External Biller" as Biller
+participant "BillerAdapter" as Adapter
+participant "ReconciliationJob" as Recon
+participant "PaymentProcessor" as Processor
+participant "WalletService/Ledger" as Wallet
+participant "AuditLog" as Audit
+participant "NotificationService" as Notif
+actor "Customer/App" as App
+
+alt Trigger 1: Live Biller Refusal (state = SentToBiller)
+  Biller --> Adapter : refusalResponse(errorCode, reason)
+  Adapter --> Processor : PaymentRefused(paymentRef, reason)
+else Trigger 2a: Biller Async Failure or Retry Refusal (state = Unknown)
+  note over Biller, Adapter
+    Triggered by TopUpNet async "failed" callback
+    or 1/5/15-min re-query returning biller refusal.
+  end note
+  Biller --> Adapter : failureCallback / retryRefusal(errorCode, reason)
+  Adapter --> Processor : NonReceiptConfirmed(paymentRef, reason)
+else Trigger 2b: Nightly Settlement Reconciliation (state = Unknown)
+  note over Recon, Processor
+    Triggered by nightly reconciliation confirming
+    the payment is absent from the biller's settlement file.
+  end note
+  Recon -> Processor : confirmNonReceipt(paymentRef, reason)
+end
+
+Processor -> Processor : loadPaymentWithLock(paymentRef)
+
+alt Payment is already Refunded
+  Processor -> Audit : logIgnoredDuplicateRefund(system, paymentRef, "Already Refunded")
+  note right of Processor
+    Idempotency guard: ignore duplicate failure
+    or refund event so funds are never released twice.
+  end note
+else Payment state is SentToBiller or Unknown
+  group Atomic DB Transaction [rolls back on audit/DB failure (FR-25 S3)]
+    Processor -> Processor : validateAndTransition(SentToBiller | Unknown -> Failed)
+    note right of Processor
+      Strict State Machine (Sec. 2.5):
+      Payment MUST transition to Failed first.
+      Never refund directly from Unknown.
+    end note
+
+    Processor -> Wallet : releaseHold(payerWalletId, heldAmount, paymentRef, reason)
+    note right of Wallet
+      Appends immutable RELEASE_HOLD ledger entry;
+      moves heldAmount from held back to available
+      balance (agent wallet if agent-assisted, D3).
+      No agent commission is credited.
+    end note
+    Wallet --> Processor : holdReleased(ledgerEntryId)
+
+    Processor -> Processor : validateAndTransition(Failed -> Refunded)
+
+    Processor -> Audit : recordMoneyMovement(system, RELEASE_HOLD, heldAmount, paymentRef, reason)
+    Audit --> Processor : auditRecorded
+  end
+
+  Processor ->> Notif : emitPaymentFailed(customerId, paymentRef, heldAmount, reason)
+  Notif ->> App : deliver SMS & Push ("Payment failed & refunded: <reason>")
+  note right of Notif
+    Async delivery (retried 3x, then marked undelivered).
+    Notification failure never reverses Refunded state.
+  end note
+else Payment is in another state (e.g., Completed, Rejected, Initiated)
+  Processor -> Audit : logInvalidTransition(system, paymentRef, currentState)
+  note right of Processor
+    Final states (Completed, Rejected) are immutable.
+    Settlement mismatches are flagged for support (D9);
+    post-completion refunds use RefundRequest (D6).
+  end note
+end
+@enduml

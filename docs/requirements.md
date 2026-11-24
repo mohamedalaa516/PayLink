@@ -63,7 +63,7 @@ PayLink makes money by charging a small service fee on each payment and pays age
     - **Ambiguity:** Section 2.2 Step 4 checks for blocked accounts during bill payments, but does not state whether blocked accounts can still top up their wallets or upgrade verification levels.
     - **Decision:** Freeze blocked accounts across all sensitive operations—blocked accounts cannot initiate payments, top up their wallets, or undergo verification upgrades until unblocked by support.
     
-## 4. Functional Requirements — User Stories (FR-1 to FR-15)
+## 4. Functional Requirements — User Stories (FR-1 to FR-28)
 
 ### FR-1: Customer Registration (`Must`)
 
@@ -688,7 +688,7 @@ PayLink makes money by charging a small service fee on each payment and pays age
 ### Measurement Notes
 
 - **NFR-1 (Correctness):** Run a Jest integration suite inside GitHub Actions using `Promise.all` to fire concurrent wallet debits (`#4`), repeated identical idempotency keys (`#1`), payload-mismatch retries returning `409 Conflict` (D5), and duplicate TopUpNet callbacks (`#6`), then query the relational DB ledger sum to assert that no wallet balance is negative and each payment settled at most once.
-- **NFR-2 (Performance):** Execute a 60-second constant-arrival-rate `k6` script (`100 req/s`) locally against the `docker compose` stack using a realistic biller traffic mix across ElectroCo (`< 1 s`), AquaCo (`2–4 s`), and TopUpNet (immediate async `"accepted"`). Archive the summary output in the Phase 2 report to verify `>= 100 payments/s` across the combined mix, `< 1%` unexpected `5xx` errors, and the *(Team-proposed)* `p95 <= 500 ms` bound specifically on the fast ElectroCo and TopUpNet initial-accept endpoints.
+- **NFR-2 (Performance):** Execute a 60-second constant-arrival-rate `k6` script (`100 payment requests/s`) locally against the `docker compose` stack using a realistic biller traffic mix across ElectroCo (`< 1 s`), AquaCo (`2–4 s`), and TopUpNet (immediate async `"accepted"`). Archive the summary output in the Phase 2 report to verify `>= 100 payments/s` across the combined mix, `< 1%` unexpected `5xx` errors, and the *(Team-proposed)* `p95 <= 500 ms` bound specifically on the fast ElectroCo and TopUpNet initial-accept endpoints.
 - **NFR-3 (Resilience):** Configure mock biller fault modes via test control endpoints (ElectroCo `12 s` hang, AquaCo XML refusal, SMS `503` outage) in CI integration tests. Assert that payments routed to unaffected billers reach `Completed` with `0%` peer-induced failures, timed-out payments transition to `Unknown` with funds held, and failed SMS messages queue for `3` retries without rolling back `Completed` payments.
 - **NFR-4 (Modifiability):** Enforce module isolation via PR review and inspect `git diff --name-only` to verify that adding a new biller adapter (`#8`) or implementing ElectroCo API v2 modifies only files inside the `Biller Integration` module (plus its adapter tests) and configuration, with zero diffs in any other module directory.
 - **NFR-5 (Auditability):** Run an end-to-end Jest audit verification test in CI that executes top-ups, payments, refunds, commissions, reconciliation adjustments, and admin/support mutations. Query the database to assert that `100%` of ledger rows have a matching audit record (`actor_id`, `created_at`, `reason`) and that every admin/support action without a ledger row also writes a complete audit record.

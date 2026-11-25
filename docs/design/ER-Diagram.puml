@@ -1,0 +1,363 @@
+@startuml PayLink_ER_Diagram
+
+title PayLink - ER Diagram
+
+hide circle
+skinparam linetype ortho
+skinparam shadowing false
+
+' ============ Accounts ============
+entity accounts {
+  * id : BIGINT <<PK>>
+  --
+  name : VARCHAR(100)
+  email : VARCHAR(150) <<UNIQUE>>
+  password_hash : VARCHAR(255)
+  phone : VARCHAR(20) <<UNIQUE>>
+  status : VARCHAR(20)
+  created_at : TIMESTAMPTZ
+}
+
+entity customers {
+  * id : BIGINT <<PK, FK>>
+  --
+  verification_level : VARCHAR(20)
+  daily_limit : DECIMAL(19,4)
+}
+
+entity agents {
+  * id : BIGINT <<PK, FK>>
+  --
+  agent_daily_limit : DECIMAL(19,4)
+  terminal_id : VARCHAR(50) <<UNIQUE>>
+}
+
+entity support_employees {
+  * id : BIGINT <<PK, FK>>
+  --
+  department : VARCHAR(100)
+}
+
+entity admins {
+  * id : BIGINT <<PK, FK>>
+  --
+  admin_level : VARCHAR(30)
+}
+
+' ============ Wallet & Top-Ups ============
+entity wallets {
+  * id : BIGINT <<PK>>
+  --
+  owner_account_id : BIGINT <<FK, UNIQUE>>
+  currency : CHAR(3)
+  created_at : TIMESTAMPTZ
+}
+
+entity top_ups {
+  * id : BIGINT <<PK>>
+  --
+  wallet_id : BIGINT <<FK>>
+  account_id : BIGINT <<FK>>
+  amount : DECIMAL(19,4)
+  source : VARCHAR(30)
+  idempotency_key_id : BIGINT <<FK, UNIQUE>>
+  created_at : TIMESTAMPTZ
+}
+
+entity ledger_entries {
+  * id : BIGINT <<PK>>
+  --
+  wallet_id : BIGINT <<FK>>
+  type : VARCHAR(30)
+  amount : DECIMAL(19,4)
+  direction : VARCHAR(10)
+  reference_type : VARCHAR(30)
+  reference_id : BIGINT <<NULL>>
+  created_at : TIMESTAMPTZ
+}
+
+entity holds {
+  * id : BIGINT <<PK>>
+  --
+  wallet_id : BIGINT <<FK>>
+  payment_id : BIGINT <<FK, UNIQUE>>
+  amount : DECIMAL(19,4)
+  status : VARCHAR(20)
+  created_at : TIMESTAMPTZ
+  released_at : TIMESTAMPTZ <<NULL>>
+}
+
+' ============ Biller Catalog ============
+entity billers {
+  * id : BIGINT <<PK>>
+  --
+  name : VARCHAR(100) <<UNIQUE>>
+  protocol : VARCHAR(30)
+  is_active : BOOLEAN
+  timeout_seconds : INT
+}
+
+entity biller_services {
+  * id : BIGINT <<PK>>
+  --
+  biller_id : BIGINT <<FK>>
+  name : VARCHAR(100)
+  category : VARCHAR(50)
+  min_amount : DECIMAL(19,4)
+  max_amount : DECIMAL(19,4)
+  required_fields : JSONB
+  is_active : BOOLEAN
+}
+
+' ============ Payments ============
+entity payments {
+  * id : BIGINT <<PK>>
+  --
+  reference : VARCHAR(50) <<UNIQUE>>
+  payer_account_id : BIGINT <<FK>>
+  initiated_by_account_id : BIGINT <<FK>>
+  service_id : BIGINT <<FK>>
+  bill_reference : VARCHAR(100)
+  biller_reference : VARCHAR(100) <<NULL>>
+  bill_amount : DECIMAL(19,4)
+  service_fee : DECIMAL(19,4)
+  total_amount : DECIMAL(19,4)
+  status : VARCHAR(30)
+  failure_reason : TEXT <<NULL>>
+  retry_count : INT
+  next_retry_at : TIMESTAMPTZ <<NULL>>
+  idempotency_key_id : BIGINT <<FK, UNIQUE>>
+  created_at : TIMESTAMPTZ
+  updated_at : TIMESTAMPTZ
+}
+
+entity payment_transitions {
+  * id : BIGINT <<PK>>
+  --
+  payment_id : BIGINT <<FK>>
+  from_status : VARCHAR(30)
+  to_status : VARCHAR(30)
+  event : VARCHAR(50)
+  actor_id : BIGINT <<FK, NULL>>
+  occurred_at : TIMESTAMPTZ
+}
+
+entity idempotency_keys {
+  * id : BIGINT <<PK>>
+  --
+  key : VARCHAR(150) <<UK1>>
+  account_id : BIGINT <<FK, UK1>>
+  payload_hash : VARCHAR(64)
+  status : VARCHAR(20)
+  response_payload : JSONB <<NULL>>
+  expires_at : TIMESTAMPTZ
+  created_at : TIMESTAMPTZ
+}
+
+' ============ Fees & Commissions ============
+entity fee_rules {
+  * id : BIGINT <<PK>>
+  --
+  service_id : BIGINT <<FK>>
+  fee_type : VARCHAR(30)
+  fee_value : DECIMAL(19,4) <<NULL>>
+  min_fee : DECIMAL(19,4) <<NULL>>
+  is_active : BOOLEAN
+}
+
+entity fee_tiers {
+  * id : BIGINT <<PK>>
+  --
+  fee_rule_id : BIGINT <<FK>>
+  min_amount : DECIMAL(19,4)
+  max_amount : DECIMAL(19,4) <<NULL>>
+  fee_amount : DECIMAL(19,4)
+}
+
+entity promotions {
+  * id : BIGINT <<PK>>
+  --
+  biller_id : BIGINT <<FK>>
+  start_at : TIMESTAMPTZ
+  end_at : TIMESTAMPTZ
+  zero_fee : BOOLEAN
+  created_by : BIGINT <<FK, NULL>>
+  created_at : TIMESTAMPTZ
+}
+
+entity commissions {
+  * id : BIGINT <<PK>>
+  --
+  payment_id : BIGINT <<FK, UNIQUE>>
+  agent_id : BIGINT <<FK>>
+  amount : DECIMAL(19,4)
+  percentage : DECIMAL(5,2)
+  reversed_at : TIMESTAMPTZ <<NULL>>
+  created_at : TIMESTAMPTZ
+}
+
+' ============ Refunds (FR-27) ============
+entity refund_requests {
+  * id : BIGINT <<PK>>
+  --
+  payment_id : BIGINT <<FK, UNIQUE>>
+  requested_by_account_id : BIGINT <<FK>>
+  reviewed_by_account_id : BIGINT <<FK, NULL>>
+  status : VARCHAR(20)
+  reason : VARCHAR(255)
+  compensating_ledger_entry_id : BIGINT <<FK, UNIQUE, NULL>>
+  created_at : TIMESTAMPTZ
+  reviewed_at : TIMESTAMPTZ <<NULL>>
+}
+
+' ============ Notifications ============
+entity notifications {
+  * id : BIGINT <<PK>>
+  --
+  account_id : BIGINT <<FK>>
+  payment_id : BIGINT <<FK, NULL>>
+  channel : VARCHAR(20)
+  template : VARCHAR(50)
+  status : VARCHAR(20)
+  retry_count : INT
+  created_at : TIMESTAMPTZ
+}
+
+entity notification_attempts {
+  * id : BIGINT <<PK>>
+  --
+  notification_id : BIGINT <<FK>>
+  attempt_no : INT
+  error : TEXT <<NULL>>
+  attempted_at : TIMESTAMPTZ
+}
+
+' ============ Fraud ============
+entity fraud_rules {
+  * id : BIGINT <<PK>>
+  --
+  name : VARCHAR(100)
+  rule_type : VARCHAR(50)
+  threshold : DECIMAL(19,4)
+  window_seconds : INT <<NULL>>
+  is_active : BOOLEAN
+  created_at : TIMESTAMPTZ
+}
+
+entity velocity_counters {
+  * id : BIGINT <<PK>>
+  --
+  account_id : BIGINT <<FK, UK1>>
+  window_start : TIMESTAMPTZ <<UK1>>
+  attempt_count : INT
+  blocked_until : TIMESTAMPTZ <<NULL>>
+}
+
+' ============ Reconciliation ============
+entity reconciliation_jobs {
+  * id : BIGINT <<PK>>
+  --
+  biller_id : BIGINT <<FK>>
+  run_date : DATE
+  status : VARCHAR(20)
+  created_at : TIMESTAMPTZ
+}
+
+entity settlement_records {
+  * id : BIGINT <<PK>>
+  --
+  job_id : BIGINT <<FK, UK1>>
+  payment_id : BIGINT <<FK, NULL>>
+  biller_reference : VARCHAR(100) <<UK1>>
+  amount : DECIMAL(19,4)
+  status : VARCHAR(30)
+  recorded_at : TIMESTAMPTZ
+}
+
+entity reconciliation_reports {
+  * id : BIGINT <<PK>>
+  --
+  job_id : BIGINT <<FK, UNIQUE>>
+  discrepancies_json : JSONB
+  created_at : TIMESTAMPTZ
+}
+
+' ============ Audit ============
+entity audit_logs {
+  * id : BIGINT <<PK>>
+  --
+  actor_id : BIGINT <<FK, NULL>>
+  actor_role : VARCHAR(30)
+  action : VARCHAR(100)
+  entity_type : VARCHAR(50)
+  entity_id : BIGINT <<NULL>>
+  amount : DECIMAL(19,4) <<NULL>>
+  reason : TEXT <<NULL>>
+  created_at : TIMESTAMPTZ
+}
+
+' ============ Relationships ============
+
+' Account Subtypes
+accounts ||--o| customers
+accounts ||--o| agents
+accounts ||--o| support_employees
+accounts ||--o| admins
+
+' Wallet & Top-Ups
+accounts ||--o| wallets
+wallets ||--o{ ledger_entries
+wallets ||--o{ holds
+wallets ||--o{ top_ups
+accounts ||--o{ top_ups
+
+' Biller Catalog
+billers ||--o{ biller_services
+
+' Payments
+accounts ||--o{ payments : payer
+accounts ||--o{ payments : initiator
+biller_services ||--o{ payments
+payments ||--o| holds
+payments ||--o{ payment_transitions
+accounts ||--o{ payment_transitions : actor
+
+' Idempotency
+accounts ||--o{ idempotency_keys
+idempotency_keys ||--o| payments
+idempotency_keys ||--o| top_ups
+
+' Fees & Promotions
+biller_services ||--o{ fee_rules
+fee_rules ||--o{ fee_tiers
+billers ||--o{ promotions
+admins ||--o{ promotions : creator
+
+' Commissions
+payments ||--o| commissions
+agents ||--o{ commissions
+
+' Refunds
+payments ||--o| refund_requests
+accounts ||--o{ refund_requests : requester
+support_employees ||--o{ refund_requests : reviewer
+ledger_entries |o--o| refund_requests : compensating_entry
+
+' Notifications
+accounts ||--o{ notifications
+payments ||--o{ notifications
+notifications ||--o{ notification_attempts
+
+' Fraud
+accounts ||--o{ velocity_counters
+
+' Reconciliation
+billers ||--o{ reconciliation_jobs
+reconciliation_jobs ||--o{ settlement_records
+payments |o--o{ settlement_records
+reconciliation_jobs ||--|| reconciliation_reports
+
+' Audit
+accounts ||--o{ audit_logs : actor
+
+@enduml

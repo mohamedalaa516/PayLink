@@ -1,0 +1,471 @@
+@startuml PayLink_Domain_Class_Diagram
+title PayLink - Domain Class Diagram (v4 - Final)
+
+skinparam dpi 300
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+hide empty methods
+
+' ============ Enums ============
+
+enum AccountStatus {
+  ACTIVE
+  BLOCKED
+}
+
+enum VerificationLevel {
+  BASIC
+  VERIFIED
+}
+
+enum WalletType {
+  CUSTOMER
+  AGENT
+  SYSTEM
+}
+
+enum PaymentStatus {
+  INITIATED
+  FUNDS_HELD
+  SENT_TO_BILLER
+  COMPLETED
+  FAILED
+  UNKNOWN
+  REJECTED
+  REFUNDED
+}
+
+enum HoldStatus {
+  ACTIVE
+  RELEASED
+  CHARGED
+}
+
+enum LedgerEntryType {
+  TOPUP
+  HOLD
+  RELEASE_HOLD
+  CHARGE
+  REFUND
+  FEE_INCOME
+  COMMISSION
+  COMMISSION_REVERSAL
+  ADJUSTMENT
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum FeeType {
+  FIXED
+  PERCENTAGE
+  TIERED
+}
+
+enum RefundStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum NotificationChannel {
+  SMS
+  PUSH
+  EMAIL
+}
+
+enum NotificationStatus {
+  PENDING
+  DELIVERED
+  UNDELIVERED
+}
+
+enum TopUpSource {
+  SIMULATED_CARD
+  AGENT_CASH
+}
+
+' ============ Accounts & Wallet ============
+
+abstract class Account {
+  id: Long
+  name: String
+  email: String
+  phone: String
+  status: AccountStatus
+  blockedUntil: DateTime [0..1]
+  +isBlocked(): Boolean
+}
+
+class Customer extends Account {
+  verificationLevel: VerificationLevel
+  dailyLimit: Decimal [0..1]
+}
+
+class Agent extends Account {
+  agentDailyLimit: Decimal [0..1]
+  terminalId: String
+}
+
+class SupportEmployee extends Account
+class Admin extends Account
+
+class Wallet {
+  id: Long
+  ownerAccountId: Long [0..1]
+  walletType: WalletType
+  currency: String
+  +availableBalance(): Decimal
+  +heldBalance(): Decimal
+}
+
+class TopUp {
+  id: Long
+  walletId: Long
+  accountId: Long
+  amount: Decimal
+  source: TopUpSource
+  idempotencyKeyId: Long
+  createdAt: DateTime
+}
+
+class LedgerEntry {
+  id: Long
+  walletId: Long
+  amount: Decimal
+  direction: LedgerDirection
+  type: LedgerEntryType
+  referenceType: String
+  referenceId: Long [0..1]
+  createdAt: DateTime
+}
+
+class Hold {
+  id: Long
+  walletId: Long
+  paymentId: Long
+  amount: Decimal
+  status: HoldStatus
+  createdAt: DateTime
+  releasedAt: DateTime [0..1]
+}
+
+Customer "0..1" -- "1" Wallet : owns
+Agent "0..1" -- "1" Wallet : owns
+Wallet "1" -- "0..*" LedgerEntry
+Wallet "1" -- "0..*" Hold
+Wallet "1" -- "0..*" TopUp
+
+' ============ Biller Catalog ============
+
+class Biller {
+  id: Long
+  name: String
+  protocol: String
+  isActive: Boolean
+  timeoutSeconds: Integer
+}
+
+class BillerService {
+  id: Long
+  billerId: Long
+  name: String
+  category: String
+  minAmount: Decimal
+  maxAmount: Decimal
+  requiredFields: String[]
+  isActive: Boolean
+}
+
+Biller "1" *-- "1..*" BillerService
+
+' ============ Payment ============
+
+class Payment {
+  id: Long
+  reference: String
+  payerAccountId: Long
+  initiatedByAccountId: Long
+  serviceId: Long
+  billReference: String
+  billerReference: String [0..1]
+  billAmount: Decimal
+  serviceFee: Decimal
+  totalAmount: Decimal
+  status: PaymentStatus
+  failureReason: String [0..1]
+  retryCount: Integer
+  nextRetryAt: DateTime [0..1]
+  idempotencyKeyId: Long
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
+interface PaymentState {
+  +canTransitionTo(next: PaymentStatus): Boolean
+  +onEnter(payment: Payment)
+}
+
+class InitiatedState implements PaymentState
+class FundsHeldState implements PaymentState
+class SentToBillerState implements PaymentState
+class CompletedState implements PaymentState
+class FailedState implements PaymentState
+class UnknownState implements PaymentState
+class RejectedState implements PaymentState
+class RefundedState implements PaymentState
+
+class PaymentTransition {
+  id: Long
+  paymentId: Long
+  fromStatus: PaymentStatus
+  toStatus: PaymentStatus
+  event: String
+  actorId: Long [0..1]
+  occurredAt: DateTime
+}
+
+class IdempotencyKey {
+  id: Long
+  key: String
+  accountId: Long
+  payloadHash: String
+  status: IdempotencyStatus
+  responsePayload: String [0..1]
+  expiresAt: DateTime
+}
+
+Account "1" -- "0..*" Payment : payer
+Account "1" -- "0..*" Payment : initiatedBy
+BillerService "1" -- "0..*" Payment
+Payment "1" -- "1" PaymentState
+Payment "1" -- "0..*" PaymentTransition
+Payment "1" -- "0..1" Hold
+Payment "0..1" -- "1" IdempotencyKey
+TopUp "0..1" -- "1" IdempotencyKey
+Account "0..1" -- "0..*" PaymentTransition : actor
+
+' ============ Fees & Commissions ============
+
+class FeeRule {
+  id: Long
+  serviceId: Long
+  feeType: FeeType
+  feeValue: Decimal [0..1]
+  minFee: Decimal [0..1]
+  isActive: Boolean
+}
+
+class FeeTier {
+  id: Long
+  feeRuleId: Long
+  minAmount: Decimal
+  maxAmount: Decimal [0..1]
+  feeAmount: Decimal
+}
+
+class Promotion {
+  id: Long
+  billerId: Long
+  startAt: DateTime
+  endAt: DateTime
+  zeroFee: Boolean
+  createdByAccountId: Long [0..1]
+}
+
+class Commission {
+  id: Long
+  agentId: Long
+  paymentId: Long
+  amount: Decimal
+  percentage: Decimal
+  reversedAt: DateTime [0..1]
+  createdAt: DateTime
+}
+
+BillerService "1" -- "0..*" FeeRule
+FeeRule "1" *-- "0..*" FeeTier
+Biller "1" -- "0..*" Promotion
+Admin "0..1" -- "0..*" Promotion : createdBy
+Payment "1" -- "0..1" Commission
+Agent "1" -- "0..*" Commission
+
+' ============ Refund (FR-27) ============
+
+class RefundRequest {
+  id: Long
+  paymentId: Long
+  requestedByAccountId: Long
+  reviewedByAccountId: Long [0..1]
+  status: RefundStatus
+  reason: String
+  compensatingLedgerEntryId: Long [0..1]
+  createdAt: DateTime
+  reviewedAt: DateTime [0..1]
+}
+
+Payment "1" -- "0..1" RefundRequest
+Account "1" -- "0..*" RefundRequest : requestedBy
+SupportEmployee "0..1" -- "0..*" RefundRequest : reviewedBy
+RefundRequest "0..1" --> "0..1" LedgerEntry : compensatingEntry
+
+' ============ Notifications ============
+
+class Notification {
+  id: Long
+  accountId: Long
+  paymentId: Long [0..1]
+  channel: NotificationChannel
+  template: String
+  status: NotificationStatus
+  retryCount: Integer
+  createdAt: DateTime
+}
+
+class NotificationAttempt {
+  id: Long
+  notificationId: Long
+  attemptNo: Integer
+  error: String [0..1]
+  attemptedAt: DateTime
+}
+
+Account "1" -- "0..*" Notification
+Payment "0..1" -- "0..*" Notification
+Notification "1" -- "0..*" NotificationAttempt
+
+' ============ Fraud ============
+
+class VelocityCounter {
+  id: Long
+  accountId: Long
+  windowStart: DateTime
+  attemptCount: Integer
+}
+
+class FraudRule {
+  id: Long
+  name: String
+  ruleType: String
+  threshold: Decimal
+  windowSeconds: Integer [0..1]
+  isActive: Boolean
+}
+
+Account "1" -- "0..*" VelocityCounter
+
+' ============ Reconciliation ============
+
+class ReconciliationJob {
+  id: Long
+  billerId: Long
+  runDate: DateTime
+  status: String
+}
+
+class SettlementRecord {
+  id: Long
+  jobId: Long
+  paymentId: Long [0..1]
+  billerReference: String
+  amount: Decimal
+  status: String
+  recordedAt: DateTime
+}
+
+class ReconciliationReport {
+  id: Long
+  jobId: Long
+  discrepanciesJson: String
+  createdAt: DateTime
+}
+
+Biller "1" -- "0..*" ReconciliationJob
+ReconciliationJob "1" -- "0..*" SettlementRecord
+ReconciliationJob "1" -- "0..1" ReconciliationReport
+SettlementRecord "0..*" --> "0..1" Payment
+
+' ============ Audit ============
+
+class AuditLog {
+  id: Long
+  actorId: Long [0..1]
+  actorRole: String
+  action: String
+  entityType: String
+  entityId: Long [0..1]
+  amount: Decimal [0..1]
+  reason: String
+  createdAt: DateTime
+}
+
+Account "0..1" -- "0..*" AuditLog : actor
+
+' ============ Application Services ============
+
+class PaymentProcessor {
+  +processPayment(request: PaymentRequest): PaymentResult
+  +handleBillerResponse(response: BillerResponse)
+  +handleAsyncCallback(callback: BillerCallback)
+  +handleTimeout(paymentId: Long)
+  +reQueryUnknownPayment(paymentId: Long)
+  +refundFailedPayment(paymentId: Long, reason: String)
+}
+
+class FraudCheckService {
+  +executeChain(accountId: Long, billAmount: Decimal): FraudResult
+}
+
+class FeeCalculator {
+  +calculateFee(serviceId: Long, billAmount: Decimal): Decimal
+  +calculateCommission(fee: Decimal): Decimal
+}
+
+class IdempotencyService {
+  +checkOrLock(key: String, accountId: Long, payloadHash: String): IdempotencyResult
+  +saveResponse(key: String, accountId: Long, response: Object)
+}
+
+class NotificationService {
+  +send(notification: Notification)
+  +retry(notificationId: Long)
+}
+
+interface BillerAdapter {
+  +inquire(serviceId: Long, billRef: String): BillInquiryResult
+  +pay(paymentRef: String, billRef: String, amount: Decimal): BillerResponse
+  +checkStatus(paymentRef: String): BillerResponse
+}
+
+class ElectroCoAdapter implements BillerAdapter
+class AquaCoAdapter implements BillerAdapter
+class TopUpNetAdapter implements BillerAdapter
+
+class BillerAdapterFactory {
+  +getAdapter(billerId: Long): BillerAdapter
+}
+
+PaymentProcessor ..> Payment
+PaymentProcessor ..> AuditLog
+PaymentProcessor ..> FraudCheckService
+PaymentProcessor ..> FeeCalculator
+PaymentProcessor ..> IdempotencyService
+PaymentProcessor ..> Wallet
+PaymentProcessor ..> BillerAdapterFactory
+PaymentProcessor ..> NotificationService
+
+BillerAdapterFactory ..> BillerAdapter
+BillerAdapter ..> Biller : per protocol
+
+FraudCheckService ..> VelocityCounter
+FraudCheckService ..> FraudRule
+FraudCheckService ..> Account
+
+@enduml
